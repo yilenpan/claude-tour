@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""claude-tour — push an annotated list of code locations into a running nvim.
+
+Usage:
+  claude-tour TOUR.json        # send a tour file
+  claude-tour < TOUR.json      # or pipe JSON on stdin
+  claude-tour --list           # show registered nvim servers
+  claude-tour --help
+
+Tour JSON schema:
+  {
+    "title": "How login works",          # optional
+    "items": [
+      { "file": "src/auth.py",           # required; relative paths resolve
+        "line": 42,                       #   against the invocation cwd
+        "col": 5,                         # optional
+        "note": "Entry point. Mints..." },# annotation (multi-line ok)
+      ...
+    ]
+  }
+
+The plugin registers each nvim's RPC socket in
+  $XDG_STATE_HOME/claude-tour/servers.json  (default ~/.local/state/...)
+keyed by that nvim's working directory. This CLI resolves the socket by
+matching the current directory (exact, then nearest ancestor, then the
+sole server if only one is running). Override with CLAUDE_TOUR_SOCKET.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+
+def state_dir():
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(base, "claude-tour")
+
+
+def read_registry():
+    try:
+        with open(os.path.join(state_dir(), "servers.json")) as f:
+            reg = json.load(f)
+        return reg if isinstance(reg, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def find_socket(cwd):
+    override = os.environ.get("CLAUDE_TOUR_SOCKET")
+    if override:
+        return override
+    reg = read_registry()
+    if not reg:
+        return None
+    if cwd in reg:
+        return reg[cwd]
+    # nearest ancestor directory
+    best = None
+    for d, sock in reg.items():
+        base = d.rstrip("/") + "/"
+        if cwd == d or cwd.startswith(base):
+            if best is None or len(d) > len(best[0]):
+                best = (d, sock)
+    if best:
+        return best[1]
+    if len(reg) == 1:
+        return next(iter(reg.values()))
+    return None
+
+
+def die(msg, code=1):
+    print(f"claude-tour: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def main(argv):
+    if "--help" in argv or "-h" in argv:
+        print(__doc__)
+        return 0
+
+    if "--list" in argv:
+        reg = read_registry()
+        if not reg:
+            print("no nvim servers registered")
+        for d, sock in reg.items():
+            print(f"{d}\t{sock}")
+        return 0
+
+    # Read the tour JSON (file arg or stdin).
+    args = [a for a in argv if not a.startswith("-")]
+    if args:
+        with open(args[0]) as f:
+            raw = f.read()
+    else:
+        if sys.stdin.isatty():
+            die("no tour given (pass a file or pipe JSON on stdin); see --help")
+        raw = sys.stdin.read()
+
+    try:
+        tour = json.loads(raw)
+    except json.JSONDecodeError as e:
+        die(f"invalid JSON: {e}")
+
+    if not isinstance(tour, dict) or not isinstance(tour.get("items"), list):
+        die('tour must be an object with an "items" array')
+
+    cwd = os.getcwd()
+    # Record the invocation cwd so nvim resolves relative paths correctly,
+    # even if its own working directory differs.
+    tour.setdefault("cwd", cwd)
+
+    sock = find_socket(cwd)
+    if not sock:
+        die(
+            "no matching nvim found. Open nvim (with claude-tour.nvim loaded) "
+            "in this project, or set CLAUDE_TOUR_SOCKET. See `claude-tour --list`."
+        )
+
+    # Write the normalized tour to a temp file and have nvim read it.
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".json", prefix="claude-tour-", delete=False
+    ) as tf:
+        json.dump(tour, tf)
+        tour_path = tf.name
+
+    expr = "luaeval(\"require('claude-tour').load(_A)\", '%s')" % tour_path.replace(
+        "'", "''"
+    )
+    try:
+        subprocess.run(
+            ["nvim", "--server", sock, "--remote-expr", expr],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        die("nvim executable not found on PATH")
+    except subprocess.CalledProcessError:
+        die(f"could not reach nvim at {sock} (is it still running?)")
+
+    n = len(tour["items"])
+    print(f"claude-tour: sent {n} location(s) to nvim")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
