@@ -365,6 +365,21 @@ function M.load(path)
   return 1
 end
 
+-- Compact snapshot of the current tour, as a JSON string. Called by the
+-- `claude-tour` CLI (via --remote-expr) to render its "content-first" home view.
+function M.status()
+  local items = {}
+  for i, it in ipairs(state.items) do
+    items[i] = { n = i, file = it.display_file, line = it.line, note = it.note }
+  end
+  return vim.json.encode({
+    title = state.title,
+    count = #state.items,
+    current = state.idx,
+    items = items,
+  })
+end
+
 function M.setup(opts)
   config = vim.tbl_extend("force", config, opts or {})
 end

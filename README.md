@@ -69,6 +69,39 @@ claude-tour tour.json
 echo '{"title":"...","items":[...]}' | claude-tour
 ```
 
+### The `claude-tour` CLI
+
+The CLI follows the [AXI](https://agentskills.io) conventions for agent-facing
+tools — [TOON](https://toonformat.dev/) output, structured errors on stdout, and
+a content-first home view — so an agent can drive it in a single call.
+
+```sh
+claude-tour               # home view: connected nvim + current tour state
+claude-tour tour.json     # send a tour file
+claude-tour < tour.json   # send a tour on stdin
+claude-tour --list        # list every connected nvim (TOON)
+claude-tour --help        # full reference
+```
+
+Exit codes: `0` success (including no-ops), `1` error, `2` usage error. All
+output — including errors — goes to stdout; stderr stays empty.
+
+Example home view once a tour is loaded:
+
+```
+bin: ~/.local/bin/claude-tour
+description: Push annotated code tours into a running Neovim for guided navigation
+nvim: /run/user/1000/nvim.sock
+tour: How login works
+current: 1 of 2
+items[2]{n,file,line,note}:
+  1,src/auth.py,4,Entry point. Validates the user then mints a token…
+  2,src/store.py,2,"Token persisted in Redis, 24h TTL."
+help[2]:
+  In nvim: n/p to walk locations, <CR> to jump, q to close
+  Run `claude-tour <file.json>` to replace the current tour
+```
+
 ### Sidebar keys
 
 | key       | action                              |

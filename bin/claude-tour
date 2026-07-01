@@ -1,37 +1,115 @@
 #!/usr/bin/env python3
-"""claude-tour — push an annotated list of code locations into a running nvim.
+"""claude-tour — push an annotated list of code locations into a running Neovim.
 
-Usage:
-  claude-tour TOUR.json        # send a tour file
-  claude-tour < TOUR.json      # or pipe JSON on stdin
-  claude-tour --list           # show registered nvim servers
-  claude-tour --help
+Built to the AXI (Agent eXperience Interface) standard: TOON output, structured
+errors on stdout, and content-first behaviour so an agent can act in one call.
 
-Tour JSON schema:
+USAGE
+  claude-tour                  show the current tour + connected nvim (home view)
+  claude-tour TOUR.json        send a tour file to nvim
+  claude-tour < TOUR.json      send a tour piped on stdin
+  claude-tour --list           list every connected nvim (TOON)
+  claude-tour --help           this help
+
+TOUR JSON
   {
-    "title": "How login works",          # optional
+    "title": "How login works",
     "items": [
-      { "file": "src/auth.py",           # required; relative paths resolve
-        "line": 42,                       #   against the invocation cwd
-        "col": 5,                         # optional
-        "note": "Entry point. Mints..." },# annotation (multi-line ok)
-      ...
+      { "file": "src/auth.py", "line": 42, "col": 5,
+        "note": "Entry point. Mints the token here." }
     ]
   }
+  file (required)  relative paths resolve against the invocation cwd
+  line (required), col (optional, 1-based)
+  note / annotation / comment (optional)  free-form, multi-line
+
+OUTPUT CHANNELS
+  stdout  all structured output the agent consumes (data, errors, help)
+  stderr  nothing by design
+  exit    0 = success (incl. no-ops), 1 = error, 2 = usage error
 
 The plugin registers each nvim's RPC socket in
   $XDG_STATE_HOME/claude-tour/servers.json  (default ~/.local/state/...)
-keyed by that nvim's working directory. This CLI resolves the socket by
-matching the current directory (exact, then nearest ancestor, then the
-sole server if only one is running). Override with CLAUDE_TOUR_SOCKET.
+keyed by that nvim's working directory. This CLI resolves the socket by cwd
+(exact, then nearest ancestor, then the sole server). Override with
+CLAUDE_TOUR_SOCKET.
 """
 
 import json
 import os
+import select
 import subprocess
 import sys
 import tempfile
 
+NOTE_PREVIEW = 60  # truncate notes in list/home views (AXI §3)
+
+
+# --------------------------------------------------------------------------
+# TOON output helpers (AXI §1) — convert to TOON only at the output boundary.
+# --------------------------------------------------------------------------
+
+def toon_cell(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = str(v)
+    if s == "" or s != s.strip() or any(c in s for c in ',"\n:'):
+        return json.dumps(s, ensure_ascii=False)
+    return s
+
+
+def toon_array(name, fields, rows):
+    print("%s[%d]{%s}:" % (name, len(rows), ",".join(fields)))
+    for r in rows:
+        print("  " + ",".join(toon_cell(r.get(f, "")) for f in fields))
+
+
+def toon_help(lines):
+    if not lines:
+        return
+    print("help[%d]:" % len(lines))
+    for ln in lines:
+        print("  " + ln)
+
+
+def preview(text):
+    s = " ".join(str(text or "").split())
+    return s if len(s) <= NOTE_PREVIEW else s[: NOTE_PREVIEW - 1] + "…"
+
+
+def collapse_home(path):
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path.startswith(home) else path
+
+
+# --------------------------------------------------------------------------
+# structured exits (AXI §6) — errors go to stdout, not stderr.
+# --------------------------------------------------------------------------
+
+def stdin_has_data():
+    """True only if stdin is a pipe/redirect with data ready — never blocks on
+    an idle terminal (where isatty is False but no EOF ever arrives)."""
+    if sys.stdin.isatty():
+        return False
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+        return bool(ready)
+    except (OSError, ValueError):
+        return False
+
+
+def fail(error, help_lines=None, code=1):
+    print("error: " + error)
+    for ln in help_lines or []:
+        print("help: " + ln)
+    sys.exit(code)
+
+
+# --------------------------------------------------------------------------
+# server registry
+# --------------------------------------------------------------------------
 
 def state_dir():
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
@@ -47,20 +125,17 @@ def read_registry():
         return {}
 
 
-def find_socket(cwd):
+def find_socket(cwd, reg):
     override = os.environ.get("CLAUDE_TOUR_SOCKET")
     if override:
         return override
-    reg = read_registry()
     if not reg:
         return None
     if cwd in reg:
         return reg[cwd]
-    # nearest ancestor directory
     best = None
     for d, sock in reg.items():
-        base = d.rstrip("/") + "/"
-        if cwd == d or cwd.startswith(base):
+        if cwd == d or cwd.startswith(d.rstrip("/") + "/"):
             if best is None or len(d) > len(best[0]):
                 best = (d, sock)
     if best:
@@ -70,78 +145,170 @@ def find_socket(cwd):
     return None
 
 
-def die(msg, code=1):
-    print(f"claude-tour: {msg}", file=sys.stderr)
-    sys.exit(code)
+def nvim_expr(sock, expr):
+    """Evaluate a Vim expression in the target nvim; return stdout text or raise."""
+    return subprocess.run(
+        ["nvim", "--server", sock, "--remote-expr", expr],
+        check=True,
+        capture_output=True,  # never let nvim's own errors leak to our stdout
+        text=True,
+    ).stdout
 
 
-def main(argv):
-    if "--help" in argv or "-h" in argv:
-        print(__doc__)
+# --------------------------------------------------------------------------
+# commands
+# --------------------------------------------------------------------------
+
+def cmd_list():
+    reg = read_registry()
+    if not reg:
+        # Definitive empty state (AXI §5).
+        print("nvim: 0 connected")
+        toon_help(["Open nvim with claude-tour.nvim loaded to connect an instance"])
         return 0
+    rows = [{"dir": collapse_home(d), "socket": s} for d, s in sorted(reg.items())]
+    toon_array("nvim", ["dir", "socket"], rows)
+    return 0
 
-    if "--list" in argv:
-        reg = read_registry()
-        if not reg:
-            print("no nvim servers registered")
-        for d, sock in reg.items():
-            print(f"{d}\t{sock}")
-        return 0
 
-    # Read the tour JSON (file arg or stdin).
-    args = [a for a in argv if not a.startswith("-")]
-    if args:
-        with open(args[0]) as f:
-            raw = f.read()
-    else:
-        if sys.stdin.isatty():
-            die("no tour given (pass a file or pipe JSON on stdin); see --help")
-        raw = sys.stdin.read()
-
-    try:
-        tour = json.loads(raw)
-    except json.JSONDecodeError as e:
-        die(f"invalid JSON: {e}")
-
-    if not isinstance(tour, dict) or not isinstance(tour.get("items"), list):
-        die('tour must be an object with an "items" array')
+def cmd_home(bin_path):
+    # Content-first home view (AXI §8, §10): identify the tool, then show live state.
+    print("bin: " + collapse_home(bin_path))
+    print("description: Push annotated code tours into a running Neovim for guided navigation")
 
     cwd = os.getcwd()
-    # Record the invocation cwd so nvim resolves relative paths correctly,
-    # even if its own working directory differs.
-    tour.setdefault("cwd", cwd)
-
-    sock = find_socket(cwd)
+    reg = read_registry()
+    sock = find_socket(cwd, reg)
     if not sock:
-        die(
-            "no matching nvim found. Open nvim (with claude-tour.nvim loaded) "
-            "in this project, or set CLAUDE_TOUR_SOCKET. See `claude-tour --list`."
+        print("nvim: 0 connected for " + collapse_home(cwd))
+        toon_help([
+            "Open nvim (with claude-tour.nvim loaded) in this directory to connect",
+            "Run `claude-tour --list` to see every connected nvim",
+        ])
+        return 0
+
+    print("nvim: " + sock)
+    status = None
+    try:
+        raw = nvim_expr(sock, "luaeval(\"require('claude-tour').status()\")")
+        status = json.loads(raw.strip())
+    except Exception:
+        status = None
+
+    if not status or status.get("count", 0) == 0:
+        print("tour: none loaded")
+        toon_help([
+            'Run `claude-tour <file.json>` to send a tour',
+            'Pipe one: echo \'{"items":[...]}\' | claude-tour',
+        ])
+        return 0
+
+    print("tour: " + (status.get("title") or "(untitled)"))
+    print("current: %s of %d" % (status.get("current") or 0, status["count"]))
+    rows = [
+        {"n": it["n"], "file": it["file"], "line": it["line"], "note": preview(it.get("note"))}
+        for it in status.get("items", [])
+    ]
+    toon_array("items", ["n", "file", "line", "note"], rows)
+    toon_help([
+        "In nvim: n/p to walk locations, <CR> to jump, q to close",
+        "Run `claude-tour <file.json>` to replace the current tour",
+    ])
+    return 0
+
+
+def cmd_send(raw_json):
+    try:
+        tour = json.loads(raw_json)
+    except json.JSONDecodeError as e:
+        fail(
+            "invalid JSON: %s" % e,
+            ['tour must be {"title": "...", "items": [{"file": "...", "line": N, "note": "..."}]}'],
+            code=2,
+        )
+    if not isinstance(tour, dict) or not isinstance(tour.get("items"), list):
+        fail(
+            'tour must be an object with an "items" array',
+            ['claude-tour <file.json>  where the file is {"items": [{"file": "...", "line": N}]}'],
+            code=2,
         )
 
-    # Write the normalized tour to a temp file and have nvim read it.
+    cwd = os.getcwd()
+    # Record the invocation cwd so nvim resolves relative paths correctly.
+    tour.setdefault("cwd", cwd)
+
+    reg = read_registry()
+    sock = find_socket(cwd, reg)
+    if not sock:
+        fail(
+            "no nvim connected for " + collapse_home(cwd),
+            [
+                "Open nvim (with claude-tour.nvim loaded) in this directory, then retry",
+                "Run `claude-tour --list` to see every connected nvim",
+            ],
+        )
+
     with tempfile.NamedTemporaryFile(
         "w", suffix=".json", prefix="claude-tour-", delete=False
     ) as tf:
         json.dump(tour, tf)
         tour_path = tf.name
 
-    expr = "luaeval(\"require('claude-tour').load(_A)\", '%s')" % tour_path.replace(
-        "'", "''"
-    )
+    expr = "luaeval(\"require('claude-tour').load(_A)\", '%s')" % tour_path.replace("'", "''")
     try:
-        subprocess.run(
-            ["nvim", "--server", sock, "--remote-expr", expr],
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
+        nvim_expr(sock, expr)
     except FileNotFoundError:
-        die("nvim executable not found on PATH")
+        fail("nvim executable not found on PATH", ["Install Neovim, or add it to PATH"])
     except subprocess.CalledProcessError:
-        die(f"could not reach nvim at {sock} (is it still running?)")
+        fail(
+            "could not reach nvim at " + sock,
+            ["The nvim may have exited — run `claude-tour --list` to see live instances"],
+        )
 
     n = len(tour["items"])
-    print(f"claude-tour: sent {n} location(s) to nvim")
+    # Structured, definitive success (AXI §5, §6) + next steps (AXI §9).
+    if n == 0:
+        print("sent: 0 locations (tour cleared)")
+    else:
+        print("sent: %d location(s)" % n)
+        if tour.get("title"):
+            print("tour: " + tour["title"])
+    toon_help([
+        "In nvim: n/p to walk locations, <CR> to jump, q to close",
+        "Run `claude-tour` to see the current tour state",
+    ])
     return 0
+
+
+def main(argv):
+    bin_path = os.path.abspath(__file__)
+
+    if "--help" in argv or "-h" in argv:
+        print(__doc__)
+        return 0
+    if "--list" in argv:
+        return cmd_list()
+
+    positional = [a for a in argv if not a.startswith("-")]
+    unknown = [a for a in argv if a.startswith("-") and a not in ("--help", "-h", "--list")]
+    if unknown:
+        fail("unknown flag: %s" % unknown[0], ["Run `claude-tour --help` for usage"], code=2)
+
+    if positional:
+        try:
+            with open(positional[0]) as f:
+                raw = f.read()
+        except FileNotFoundError:
+            fail("no such tour file: %s" % positional[0], ["Check the path, or pipe JSON on stdin"], code=2)
+        return cmd_send(raw)
+
+    if stdin_has_data():
+        raw = sys.stdin.read()
+        if raw.strip():
+            return cmd_send(raw)
+
+    # No args, no stdin → content-first home view (AXI §8).
+    return cmd_home(bin_path)
 
 
 if __name__ == "__main__":
