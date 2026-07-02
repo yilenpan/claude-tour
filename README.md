@@ -139,14 +139,19 @@ help[2]:
 - `note` / `annotation` / `comment` (optional): free-form, multi-line, word-wrapped.
 - `title` (optional): shown at the top of the sidebar.
 
-## Telling Claude how to use it
+## Telling a coding agent how to use it
 
-Add something like this to your project's `CLAUDE.md`:
+Full agent-facing install + usage instructions live in [AGENTS.md](AGENTS.md) —
+point your coding agent (Claude Code, Codex, OpenCode, …) at that file, or copy
+its contents into your project's `CLAUDE.md` / `AGENTS.md`.
+
+The short version, for a project's `CLAUDE.md`:
 
 > When you finish exploring the codebase and want to walk me through it, write a
 > tour file and run `claude-tour <file>`. The tour is JSON:
-> `{"title": "...", "items": [{"file": "relative/path", "line": N, "note": "what happens here"}]}`.
-> Order items in reading order. Keep notes to a sentence or two.
+> `{"title": "...", "items": [{"file": "relative/path", "line": N, "end_line": M, "note": "what happens here"}]}`.
+> Order items in reading order. Use `end_line` to highlight a whole block. Keep
+> notes to a sentence or two.
 
 ## Troubleshooting
 
