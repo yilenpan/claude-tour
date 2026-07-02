@@ -123,7 +123,7 @@ help[2]:
 {
   "title": "How login works",
   "items": [
-    { "file": "src/auth.py", "line": 4, "col": 5,
+    { "file": "src/auth.py", "line": 4, "end_line": 6, "col": 5,
       "note": "Entry point. Validates the user then mints a token here." },
     { "file": "src/store.py", "line": 2,
       "note": "Token is persisted in Redis with a 24h TTL." }
@@ -134,6 +134,8 @@ help[2]:
 - `file` (required): relative paths resolve against the directory where
   `claude-tour` was invoked.
 - `line` (required), `col` (optional, 1-based).
+- `end_line` (optional): when set, the whole block `line`–`end_line` is
+  highlighted in the code window on jump; otherwise just the single line.
 - `note` / `annotation` / `comment` (optional): free-form, multi-line, word-wrapped.
 - `title` (optional): shown at the top of the sidebar.
 

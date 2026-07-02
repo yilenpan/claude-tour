@@ -14,6 +14,7 @@ local function set_hl()
   vim.api.nvim_set_hl(0, "ClaudeTourLocation", { link = "Directory", default = true })
   vim.api.nvim_set_hl(0, "ClaudeTourNote", { link = "Comment", default = true })
   vim.api.nvim_set_hl(0, "ClaudeTourCurrent", { link = "Visual", default = true })
+  vim.api.nvim_set_hl(0, "ClaudeTourTarget", { link = "Visual", default = true })
 end
 set_hl()
 

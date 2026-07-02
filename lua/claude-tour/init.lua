@@ -22,6 +22,8 @@ local state = {
   line_item = {}, -- 1-based buffer line -> item index
   ns = vim.api.nvim_create_namespace("claude_tour_current"),
   sns = vim.api.nvim_create_namespace("claude_tour_static"),
+  code_ns = vim.api.nvim_create_namespace("claude_tour_target"),
+  hl_bufnr = nil, -- code buffer currently carrying the target highlight
 }
 
 ----------------------------------------------------------------------
@@ -176,6 +178,28 @@ local function highlight_current()
   end
 end
 
+-- Clear the target-block highlight from whichever code buffer holds it.
+local function clear_target()
+  if state.hl_bufnr and vim.api.nvim_buf_is_valid(state.hl_bufnr) then
+    vim.api.nvim_buf_clear_namespace(state.hl_bufnr, state.code_ns, 0, -1)
+  end
+  state.hl_bufnr = nil
+end
+
+-- Highlight lines [line, end_line] (1-based, inclusive) in the given code buffer.
+local function highlight_target(bufnr, line, end_line)
+  clear_target()
+  local last = vim.api.nvim_buf_line_count(bufnr)
+  local from = math.max(line, 1)
+  local to = math.min(math.max(end_line or line, from), last)
+  for l = from, to do
+    vim.api.nvim_buf_set_extmark(bufnr, state.code_ns, l - 1, 0, {
+      line_hl_group = "ClaudeTourTarget",
+    })
+  end
+  state.hl_bufnr = bufnr
+end
+
 ----------------------------------------------------------------------
 -- sidebar window / buffer
 ----------------------------------------------------------------------
@@ -247,6 +271,7 @@ function M.close()
     vim.api.nvim_win_close(state.winid, true)
   end
   state.winid = nil
+  clear_target()
 end
 
 ----------------------------------------------------------------------
@@ -283,6 +308,7 @@ function M.goto_item(i, keep_focus_sidebar)
   local col = math.max((it.col or 1) - 1, 0)
   pcall(vim.api.nvim_win_set_cursor, 0, { lnum, col })
   vim.cmd("normal! zz")
+  highlight_target(vim.api.nvim_win_get_buf(win), lnum, it.end_line)
   highlight_current()
   if keep_focus_sidebar and state.winid and vim.api.nvim_win_is_valid(state.winid) then
     vim.api.nvim_set_current_win(state.winid)
@@ -324,6 +350,7 @@ function M.set_tour(data)
         path = path,
         display_file = vim.fn.fnamemodify(path, ":."),
         line = line,
+        end_line = tonumber(raw.end_line or raw["end"]),
         col = tonumber(raw.col),
         note = raw.note or raw.annotation or raw.comment or "",
       }
